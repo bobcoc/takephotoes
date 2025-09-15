@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import Label, Button, Entry, IntVar, Frame, Checkbutton
+from tkinter import Label, Button, Entry, IntVar, Frame, Checkbutton, ttk
 from PIL import Image, ImageTk
 import cv2
 import openpyxl
@@ -30,6 +30,13 @@ def load_students_info(excel_path, sheet_index=0):
     workbook.close()
     return students_info
 
+def get_sheet_names(excel_path):
+    """获取Excel文件中所有sheet的名称"""
+    workbook = openpyxl.load_workbook(excel_path, read_only=True)
+    sheet_names = workbook.sheetnames
+    workbook.close()
+    return sheet_names
+
 class CameraApp:
     def __init__(self, master, excel_path):
         self.master = master
@@ -37,8 +44,10 @@ class CameraApp:
         self.students_info = []
         self.current_student_index = 0
         self.ffmpeg_process = None
+        self.sheet_names = []
+        self.current_sheet_index = 0
         self.master.title("学生录像系统")
-        self.master.geometry("1000x800")
+        self.master.geometry("1200x900")
 
         self.vid = cv2.VideoCapture(0)
         self.vid.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
@@ -80,16 +89,13 @@ class CameraApp:
         self.chk_rotate = Checkbutton(button_frame, text="旋转180度", variable=self.rotate_var, command=self.toggle_rotation, width=10, height=2)
         self.chk_rotate.pack(side=tk.LEFT, padx=5)
 
-        sheet_frame = Frame(self.main_frame)
-        sheet_frame.pack(pady=10)
-        
-        Label(sheet_frame, text="Sheet索引：").pack(side=tk.LEFT)
-        self.sheet_entry = Entry(sheet_frame, width=5)
-        self.sheet_entry.insert(0, "0")
-        self.sheet_entry.pack(side=tk.LEFT, padx=5)
+        # 班级选择控件直接添加到按钮框架中
+        Label(button_frame, text="班级：", font=("Arial", 10)).pack(side=tk.LEFT, padx=(10, 2))
+        self.class_var = tk.StringVar()
+        self.class_combo = ttk.Combobox(button_frame, textvariable=self.class_var, width=12, state="readonly", font=("Arial", 10))
+        self.class_combo.pack(side=tk.LEFT, padx=2)
+        self.class_combo.bind("<<ComboboxSelected>>", self.on_class_selected)
 
-        self.btn_load_sheet = Button(sheet_frame, text="加载Sheet", command=self.load_sheet, width=10, height=1)
-        self.btn_load_sheet.pack(side=tk.LEFT, padx=5)
 
         self.queue = queue.Queue()
         atexit.register(self.cleanup)
@@ -111,7 +117,7 @@ class CameraApp:
         window_height = self.master.winfo_height()
 
         # 计算画布应该的大小（减去按钮和标签的高度）
-        canvas_height = window_height - 150  # 假设按钮和标签总高度约为150像素
+        canvas_height = window_height - 150  # 恢复原来的高度，因为班级选择框已合并到按钮行
         canvas_width = window_width - 20  # 留一些边距
 
         # 设置画布大小
@@ -123,6 +129,11 @@ class CameraApp:
 
     def _load_excel_data_thread(self):
         try:
+            # 首先获取所有sheet名称
+            sheet_names = get_sheet_names(self.excel_path)
+            self.queue.put(("update_sheets", sheet_names))
+            
+            # 然后加载第一个sheet的学生信息
             students_info = load_students_info(self.excel_path, 0)
             self.queue.put(("update_students", students_info))
         except Exception as e:
@@ -136,7 +147,13 @@ class CameraApp:
         try:
             while True:
                 message, data = self.queue.get_nowait()
-                if message == "update_students":
+                if message == "update_sheets":
+                    print(f"Updating sheet names: {data}")
+                    self.sheet_names = data
+                    self.class_combo['values'] = data
+                    if data:
+                        self.class_combo.set(data[0])  # 设置默认选择第一个班级
+                elif message == "update_students":
                     print(f"Updating students: {len(data)} students loaded")
                     self.students_info = data
                     self.update_student_info()
@@ -150,29 +167,32 @@ class CameraApp:
         finally:
             self.master.after(100, self.process_queue)
 
-    def load_sheet(self):
-        try:
-            sheet_index = int(self.sheet_entry.get())
-            print(f"Loading sheet index: {sheet_index}")
-            self.label.config(text="正在加载...")
-            threading.Thread(target=self._load_new_sheet, args=(sheet_index,), daemon=True).start()
-        except ValueError:
-            print("Invalid sheet index")
-            self.label.config(text="无效的Sheet索引")
 
-    def _load_new_sheet(self, sheet_index):
+    def toggle_rotation(self):
+        print(f"Rotation toggled: {'开启' if self.rotate_var.get() == 1 else '关闭'}")
+
+    def on_class_selected(self, event):
+        """当班级选择改变时的回调函数"""
+        selected_class = self.class_var.get()
+        if selected_class and selected_class in self.sheet_names:
+            sheet_index = self.sheet_names.index(selected_class)
+            print(f"Selected class: {selected_class}, sheet index: {sheet_index}")
+            self.current_sheet_index = sheet_index
+            self.current_student_index = 0  # 重置到第一个学生
+            self.label.config(text="正在加载...")
+            threading.Thread(target=self._load_class_students, args=(sheet_index,), daemon=True).start()
+
+    def _load_class_students(self, sheet_index):
+        """加载指定班级的学生信息"""
         try:
             students_info = load_students_info(self.excel_path, sheet_index)
             self.queue.put(("update_students", students_info))
         except Exception as e:
-            print(f"Error in _load_new_sheet: {e}")
+            print(f"Error in _load_class_students: {e}")
             traceback.print_exc()
             self.queue.put(("error", str(e)))
         finally:
             self.queue.put(("done", None))
-
-    def toggle_rotation(self):
-        print(f"Rotation toggled: {'开启' if self.rotate_var.get() == 1 else '关闭'}")
 
     def toggle_recording(self):
         if hasattr(self, 'is_recording') and self.is_recording:
