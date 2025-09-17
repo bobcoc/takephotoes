@@ -11,6 +11,7 @@ import queue
 import atexit
 import traceback
 import numpy as np
+import time
 
 def load_students_info(excel_path, sheet_index=0):
     print(f"Loading students info from sheet index: {sheet_index}")
@@ -52,6 +53,16 @@ class CameraApp:
         self.vid = cv2.VideoCapture(0)
         self.vid.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         self.vid.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        
+        # 获取摄像头的实际帧率
+        self.camera_fps = self.vid.get(cv2.CAP_PROP_FPS)
+        if self.camera_fps <= 0 or self.camera_fps > 60:
+            self.camera_fps = 30.0  # 默认帧率
+        print(f"摄像头帧率: {self.camera_fps} fps")
+        
+        # 计算每帧的时间间隔（毫秒）
+        self.frame_interval = int(1000 / self.camera_fps)
+        print(f"帧间隔: {self.frame_interval} ms")
 
         # 创建一个主框架来包含所有元素
         self.main_frame = Frame(master)
@@ -101,7 +112,7 @@ class CameraApp:
         atexit.register(self.cleanup)
 
         self.master.after(100, self.load_excel_data)
-        self.master.after(10, self.update)
+        self.master.after(self.frame_interval, self.update)
         self.master.after(100, self.process_queue)
 
         # 绑定窗口大小变化事件
@@ -205,8 +216,12 @@ class CameraApp:
         exam_id, name = self.students_info[self.current_student_index]
         video_name = f"{exam_id}_{name}.mp4"
         
-        # 创建一个管道来传输视频帧
+        # 创建一个管道来传输视频帧，包含时间戳信息
         self.frame_queue = queue.Queue(maxsize=100)
+        
+        # 记录录制开始时间，用于精确的时间戳控制
+        self.recording_start_time = time.time()
+        self.frame_count = 0
         
         # 启动一个新线程来处理视频帧
         self.recording_thread = threading.Thread(target=self.process_frames, args=(video_name,))
@@ -215,18 +230,51 @@ class CameraApp:
         self.is_recording = True
         self.recording_status.config(text="正在录像", fg="red")
         self.btn_recording.config(text="结束录像")
-        print(f"Recording started for {name} ({exam_id}).")
+        print(f"Recording started for {name} ({exam_id}). Target FPS: {self.camera_fps}")
 
     def process_frames(self, video_name):
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(video_name, fourcc, 30.0, (1920, 1080))
+        # 使用摄像头的实际帧率
+        out = cv2.VideoWriter(video_name, fourcc, self.camera_fps, (1920, 1080))
+        
+        frame_duration = 1.0 / self.camera_fps  # 每帧应该的时间间隔（秒）
+        last_write_time = self.recording_start_time
+        frames_written = 0
+        frames_received = 0
+        
+        print(f"开始录制，目标帧率: {self.camera_fps} fps，帧间隔: {frame_duration:.3f}s")
         
         while self.is_recording:
             try:
-                frame = self.frame_queue.get(timeout=1)
-                out.write(frame)
+                frame_data = self.frame_queue.get(timeout=1)
+                frames_received += 1
+                
+                # 计算当前应该写入的时间点
+                target_time = self.recording_start_time + frames_written * frame_duration
+                current_time = time.time()
+                
+                # 如果当前时间已经超过了目标时间，说明需要写入帧
+                if current_time >= target_time:
+                    out.write(frame_data)
+                    frames_written += 1
+                    last_write_time = current_time
+                    
+                    # 每100帧打印一次统计信息
+                    if frames_written % 100 == 0:
+                        actual_fps = frames_written / (current_time - self.recording_start_time)
+                        print(f"已录制 {frames_written} 帧，实际FPS: {actual_fps:.2f}，队列大小: {self.frame_queue.qsize()}")
+                else:
+                    # 如果时间还没到，将帧放回队列
+                    self.frame_queue.put(frame_data)
+                    time.sleep(0.001)  # 短暂休眠避免CPU占用过高
+                    
             except queue.Empty:
                 continue
+        
+        # 录制结束统计
+        total_time = time.time() - self.recording_start_time
+        actual_fps = frames_written / total_time if total_time > 0 else 0
+        print(f"录制结束: 总时长 {total_time:.2f}s，写入帧数 {frames_written}，实际FPS {actual_fps:.2f}")
         
         out.release()
 
@@ -235,7 +283,16 @@ class CameraApp:
             self.is_recording = False
             self.recording_thread.join()
             exam_id, name = self.students_info[self.current_student_index]
-            print(f"Recording stopped and saved for {name} ({exam_id}).")
+            
+            # 计算录制统计信息
+            if hasattr(self, 'recording_start_time'):
+                total_recording_time = time.time() - self.recording_start_time
+                captured_fps = self.frame_count / total_recording_time if total_recording_time > 0 else 0
+                print(f"Recording stopped for {name} ({exam_id}).")
+                print(f"录制统计: 总时长 {total_recording_time:.2f}s，捕获帧数 {self.frame_count}，捕获FPS {captured_fps:.2f}")
+            else:
+                print(f"Recording stopped and saved for {name} ({exam_id}).")
+            
             self.recording_status.config(text="就绪", fg="green")
             self.btn_recording.config(text="开始录像")
 
@@ -279,10 +336,13 @@ class CameraApp:
             if self.rotate_var.get() == 1:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
             
-            # 如果正在录像，将帧添加到队列中
+            # 如果正在录像，将帧添加到队列中，包含时间戳
             if hasattr(self, 'is_recording') and self.is_recording:
                 if self.frame_queue.qsize() < 100:  # 限制队列大小以防内存溢出
-                    self.frame_queue.put(cv2.resize(frame, (1920, 1080)))
+                    # 确保帧的尺寸正确
+                    frame_for_recording = cv2.resize(frame, (1920, 1080))
+                    self.frame_queue.put(frame_for_recording)
+                    self.frame_count += 1
             
             # 获取当前画布大小
             canvas_width = self.canvas.winfo_width()
@@ -306,7 +366,7 @@ class CameraApp:
             self.canvas.delete("all")
             self.canvas.create_image(canvas_width//2, canvas_height//2, image=self.photo, anchor=tk.CENTER)
 
-        self.master.after(10, self.update)
+        self.master.after(self.frame_interval, self.update)
 
     def cleanup(self):
         print("Cleaning up resources...")
@@ -324,7 +384,7 @@ class CameraApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    excel_path = "mt.xlsx"
+    excel_path = "mt2025.xlsx"  # 使用转换后的文件
     app = CameraApp(root, excel_path)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     
