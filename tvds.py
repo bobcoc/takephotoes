@@ -38,6 +38,54 @@ def get_sheet_names(excel_path):
     workbook.close()
     return sheet_names
 
+def detect_cameras():
+    """检测可用的摄像头"""
+    available_cameras = []
+    
+    print("正在检测可用的摄像头...")
+    
+    # 检测前10个可能的摄像头索引
+    for index in range(10):
+        cap = cv2.VideoCapture(index)
+        if cap.isOpened():
+            # 尝试读取一帧来确认摄像头真的可用
+            ret, frame = cap.read()
+            if ret:
+                # 获取摄像头信息
+                width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                
+                camera_info = {
+                    'index': index,
+                    'name': f"摄像头 {index} ({int(width)}x{int(height)})",
+                    'width': int(width),
+                    'height': int(height),
+                    'fps': fps
+                }
+                available_cameras.append(camera_info)
+                print(f"✅ 摄像头 {index}: {int(width)}x{int(height)} @ {fps:.1f}fps")
+            cap.release()
+        else:
+            # 如果连续3个索引都没有摄像头，就停止检测
+            if index > 2 and len(available_cameras) == 0:
+                break
+    
+    if not available_cameras:
+        print("❌ 未检测到任何可用的摄像头")
+        # 如果没有检测到摄像头，添加默认选项
+        available_cameras.append({
+            'index': 0,
+            'name': "默认摄像头 (索引 0)",
+            'width': 640,
+            'height': 480,
+            'fps': 30.0
+        })
+    else:
+        print(f"\n共检测到 {len(available_cameras)} 个可用摄像头")
+    
+    return available_cameras
+
 class CameraApp:
     def __init__(self, master, excel_path):
         self.master = master
@@ -47,12 +95,16 @@ class CameraApp:
         self.ffmpeg_process = None
         self.sheet_names = []
         self.current_sheet_index = 0
+        self.available_cameras = []
+        self.current_camera_index = 0
         self.master.title("学生录像系统")
         self.master.geometry("1200x900")
 
-        self.vid = cv2.VideoCapture(0)
-        self.vid.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.vid.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        # 检测可用摄像头
+        self.available_cameras = detect_cameras()
+        
+        # 初始化摄像头
+        self.init_camera()
         
         # 获取摄像头的实际帧率
         self.camera_fps = self.vid.get(cv2.CAP_PROP_FPS)
@@ -107,6 +159,19 @@ class CameraApp:
         self.class_combo.pack(side=tk.LEFT, padx=2)
         self.class_combo.bind("<<ComboboxSelected>>", self.on_class_selected)
 
+        # 摄像头选择控件
+        Label(button_frame, text="摄像头：", font=("Arial", 10)).pack(side=tk.LEFT, padx=(10, 2))
+        self.camera_var = tk.StringVar()
+        self.camera_combo = ttk.Combobox(button_frame, textvariable=self.camera_var, width=20, state="readonly", font=("Arial", 10))
+        self.camera_combo.pack(side=tk.LEFT, padx=2)
+        self.camera_combo.bind("<<ComboboxSelected>>", self.on_camera_selected)
+        
+        # 填充摄像头选项
+        camera_names = [cam['name'] for cam in self.available_cameras]
+        self.camera_combo['values'] = camera_names
+        if camera_names:
+            self.camera_combo.set(camera_names[0])  # 设置默认选择第一个摄像头
+
 
         self.queue = queue.Queue()
         atexit.register(self.cleanup)
@@ -121,6 +186,56 @@ class CameraApp:
     def on_resize(self, event):
         # 当窗口大小改变时，调整画布大小
         self.update_canvas_size()
+
+    def init_camera(self):
+        """初始化摄像头"""
+        if self.available_cameras:
+            camera_index = self.available_cameras[0]['index']
+            print(f"初始化摄像头，索引: {camera_index}")
+        else:
+            camera_index = 0
+            print("使用默认摄像头，索引: 0")
+        
+        self.vid = cv2.VideoCapture(camera_index)
+        self.vid.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.vid.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.current_camera_index = camera_index
+
+    def switch_camera(self, camera_index):
+        """切换摄像头"""
+        # 停止当前录像（如果正在录像）
+        if hasattr(self, 'is_recording') and self.is_recording:
+            self.stop_recording()
+        
+        # 释放当前摄像头
+        if hasattr(self, 'vid') and self.vid.isOpened():
+            self.vid.release()
+        
+        # 初始化新摄像头
+        print(f"切换到摄像头，索引: {camera_index}")
+        self.vid = cv2.VideoCapture(camera_index)
+        self.vid.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.vid.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.current_camera_index = camera_index
+        
+        # 更新帧率信息
+        self.camera_fps = self.vid.get(cv2.CAP_PROP_FPS)
+        if self.camera_fps <= 0 or self.camera_fps > 60:
+            self.camera_fps = 30.0
+        self.frame_interval = int(1000 / self.camera_fps)
+        print(f"新摄像头帧率: {self.camera_fps} fps")
+
+    def on_camera_selected(self, event):
+        """当摄像头选择改变时的回调函数"""
+        selected_camera = self.camera_var.get()
+        if selected_camera:
+            # 查找选中的摄像头索引
+            for camera in self.available_cameras:
+                if camera['name'] == selected_camera:
+                    camera_index = camera['index']
+                    if camera_index != self.current_camera_index:
+                        self.switch_camera(camera_index)
+                    break
 
     def update_canvas_size(self):
         # 获取主窗口的当前大小
