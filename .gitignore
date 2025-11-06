@@ -5,11 +5,12 @@
 *.mkv
 *.wmv
 *.flv
-
+*.pptx
+*.xlsx
 # 忽略所有图片文件
 *.png
 *.jpg
-*.jpeg
+*.jpeg                                             
 *.gif
 *.bmp
 *.tiff
@@ -33,7 +34,7 @@ __pycache__/
 *.so
 .coverage
 .pytest_cache/
-
+cuted/
 # 忽略IDE文件
 .vscode/
 .idea/
